@@ -30,7 +30,7 @@ defmodule Mongo.Protocol do
     result =
       with {:ok, s} <- tcp_connect(opts, s),
            {:ok, s} <- maybe_ssl(opts, s),
-           {:ok, s} <- wire_version(s),
+           {:ok, s} <- wire_version(opts, s),
            {:ok, s} <- Mongo.Auth.run(opts, s) do
         {mod, sock} = s.socket
         :ok = setopts(mod, sock, active: :once)
@@ -41,6 +41,11 @@ defmodule Mongo.Protocol do
     case result do
       {:ok, s} ->
         {:ok, s}
+      {:is_secondary, opts, %{socket: {mod, sock}} = s} ->
+        mod.close(sock)
+        connect(opts, s)
+      {:no_master, reason} ->
+        {:error, reason}
       {:disconnect, {:tcp_recv, reason}, _s} ->
         {:error, Mongo.Error.exception(tag: :tcp, action: "recv", reason: reason)}
       {:disconnect, {:tcp_send, reason}, _s} ->
@@ -71,7 +76,6 @@ defmodule Mongo.Protocol do
     port      = opts[:port] || 27017
     sock_opts = [:binary, active: false, packet: :raw, send_timeout: s.timeout, nodelay: true]
                 ++ (opts[:socket_options] || [])
-
     case :gen_tcp.connect(host, port, sock_opts, s.timeout) do
       {:ok, socket} ->
         # A suitable :buffer is only set if :recbuf is included in
@@ -88,17 +92,30 @@ defmodule Mongo.Protocol do
     end
   end
 
-  defp wire_version(s) do
+  defp wire_version(opts, s) do
     # wire version
     # https://github.com/mongodb/mongo/blob/master/src/mongo/db/wire_version.h
     case Utils.command(-1, [ismaster: 1], s) do
-      {:ok, %{"ok" => 1.0, "maxWireVersion" => version}} ->
+      {:ok, %{"ok" => 1.0, "ismaster" => false, "primary" => primary}} ->
+        opts = update_opts(opts, primary)
+        {:is_secondary, opts, s}
+      {:ok, %{"ok" => 1.0, "ismaster" => false, "primary" => nil}} ->
+        {:no_master,"No master is yet selected"}
+      {:ok, %{"ok" => 1.0, "ismaster" => true, "maxWireVersion" => version}} ->
         {:ok, %{s | wire_version: version}}
-      {:ok, %{"ok" => 1.0}} ->
+      {:ok, %{"ok" => 1.0, "ismaster" => true}} ->
         {:ok, %{s | wire_version: 0}}
       {:disconnect, _, _} = error ->
         error
     end
+  end
+
+  defp update_opts(opts, host) do
+    [new_host, port] = String.split(host, ":")
+    new_port = String.to_integer(port)
+    opts
+    |> Keyword.put(:hostname, new_host)
+    |> Keyword.put(:port, new_port)
   end
 
   def handle_info({:tcp, data}, s) do
@@ -265,7 +282,7 @@ defmodule Mongo.Protocol do
   def ping(%{wire_version: wire_version, socket: {mod, sock}} = s) do
     {:ok, active} = getopts(mod, sock, [:active])
     :ok = setopts(mod, sock, [active: false])
-    with {:ok, %{wire_version: ^wire_version}} <- wire_version(s),
+    with {:ok, %{wire_version: ^wire_version}} <- wire_version([],s),
          :ok = setopts(mod, sock, active),
          do: {:ok, s}
   end
