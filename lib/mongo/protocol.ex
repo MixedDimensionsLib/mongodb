@@ -2,6 +2,7 @@ defmodule Mongo.Protocol do
   use DBConnection
   use Mongo.Messages
   alias Mongo.Protocol.Utils
+  require Logger
 
   @timeout 5000
   @find_flags ~w(tailable_cursor slave_ok no_cursor_timeout await_data exhaust allow_partial_results)a
@@ -35,14 +36,17 @@ defmodule Mongo.Protocol do
         {mod, sock} = s.socket
         :ok = setopts(mod, sock, active: :once)
         Mongo.Monitor.add_conn(self(), opts[:name], s.wire_version)
+        new_host = opts[:hostname]
+        new_port = opts[:port]
+        Logger.info "Connected to #{new_host}:#{new_port}"
         {:ok, s}
       end
 
     case result do
       {:ok, s} ->
         {:ok, s}
-      {:is_secondary, opts, %{socket: {mod, sock}} = s} ->
-        mod.close(sock)
+      {:is_secondary, opts, s} ->
+        disconnect(opts,s)
         connect(opts, s)
       {:no_master, reason} ->
         {:error, reason}
@@ -53,6 +57,10 @@ defmodule Mongo.Protocol do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  def disconnect(opts, %{socket: {mod, sock}}) do
+    mod.close(sock)
   end
 
   defp maybe_ssl(opts, s) do
@@ -99,12 +107,14 @@ defmodule Mongo.Protocol do
       {:ok, %{"ok" => 1.0, "ismaster" => false, "primary" => primary}} ->
         opts = update_opts(opts, primary)
         {:is_secondary, opts, s}
-      {:ok, %{"ok" => 1.0, "ismaster" => false, "primary" => nil}} ->
+      {:ok, %{"ok" => 1.0, "ismaster" => false, "secondary" => true}} ->
         {:no_master,"No master is yet selected"}
       {:ok, %{"ok" => 1.0, "ismaster" => true, "maxWireVersion" => version}} ->
         {:ok, %{s | wire_version: version}}
       {:ok, %{"ok" => 1.0, "ismaster" => true}} ->
         {:ok, %{s | wire_version: 0}}
+      {:ok, %{"ok" => 0.0, "code" => 11602, "errmsg" => errmsg}} ->
+        {:error, errmsg}
       {:disconnect, _, _} = error ->
         error
     end
