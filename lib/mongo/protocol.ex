@@ -105,6 +105,8 @@ defmodule Mongo.Protocol do
         {:ok, %{s | wire_version: version}}
       {:ok, %{"ok" => 1.0, "ismaster" => true}} ->
         {:ok, %{s | wire_version: 0}}
+      {:ok, %{"ok" => 1.0, "info" => info}} ->
+        {:error, info}
       {:disconnect, _, _} = error ->
         error
     end
